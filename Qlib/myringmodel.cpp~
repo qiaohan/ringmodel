@@ -1,0 +1,234 @@
+#include "neuron_class.h"
+#include <iostream>
+#include <fstream>
+#include <time.h>
+#include <cmath>
+#include <stdlib.h>
+using namespace std;
+
+class Connection
+{
+    public:
+        Connection(int num, Neuron ** neu, double sparse);
+        ~Connection();
+        // 2-d strong array, Istrong[i][j] is the inhibitory degree from neuron i to j
+        double ** Istrong;
+        double ** Estrong;
+        void saveConnect(string fname);
+    private:
+        int number;
+};
+void Connection::saveConnect(string fname)
+{
+    ofstream f;
+    f.open(fname.c_str());
+    for(int i=0;i<number;i++)
+    {
+        if(Estrong[i])
+        {
+            for(int j = 0; j<number; j++)
+                f<<Estrong[i][j]<<'\t';
+        }
+        else
+        {
+            for(int j=0; j<number; j++)
+                f<<(-Istrong[i][j])<<'\t';
+        }
+        f<<endl;
+    }
+    f.close();
+}
+Connection::Connection(int num, Neuron ** neu, double sparse)
+{
+    number = num;
+    Estrong = new double*[num];
+    Istrong = new double*[num];
+    double S_E,S_I=SI;
+    for(int i=0; i<num; i++)
+    {
+        if( neu[i]->isexcit() )
+        {
+            Estrong[i] = new double[num];
+            Istrong[i] = NULL;
+            for(int j=0; j<num; j++)
+            { 
+                if(neu[j]->isexcit())
+                    S_E = (1-neu[j]->issimple())*S_EE1+S_EE0;
+                else
+                    S_E = (1-neu[j]->issimple())*S_EI1+S_EI0;
+                //excitatory Guassion, 3*num/4 neurons
+                double sigma = 220;
+                int d = j-i;
+                d = d>0?d:(-d);
+                int d1 = d;
+                int d2 = NUM_NEURON - d;
+                int neu_distance = d1<d2?d1:d2;
+                double musquare = neu_distance*neu_distance;
+                double ke = 1/(sigma*sqrt(2*PI))*exp(-musquare/(2*sigma*sigma))*4.0/3.0;
+            
+                Estrong[i][j] = ke*S_E;
+                int p = rand()%1000;
+                if(p<sparse*1000)
+                    p=1;
+                else
+                    p=0;
+            
+                Estrong[i][j] *= p;
+                Estrong[i][j] /= sparse;
+            }
+        }
+        else
+        {
+            Istrong[i] = new double[num];
+            Estrong[i] = NULL;
+            for(int j=0; j<num; j++)
+            { 
+                double ki = 4.0/num; 
+                Istrong[i][j] = ki*S_I;
+                int p = rand()%1000;
+                if(p<sparse*1000)
+                    p=1;
+                else
+                    p=0;
+            
+                Istrong[i][j] *= p;
+                Istrong[i][j] /= sparse;
+            }
+        }
+    }
+}
+Connection::~Connection()
+{
+    for(int i=0; i<number; i++)
+    {
+        if(Estrong[i])
+            delete [] Estrong[i];
+        if(Istrong[i])
+            delete [] Istrong[i];
+    }
+    delete [] Estrong;
+    delete [] Istrong;
+}
+
+int main(int argc, char* argv[])
+{
+    /*
+     * Init neurons independently
+     */
+    ofstream f;
+    f.open("neuron_parameter.txt");
+    Neuron * neurons[NUM_NEURON];
+    srand( (int)time(0) );
+    for(int i=0; i<NUM_NEURON; i++)
+    {
+        //int excit = rand()%1000<750? 1:0;
+        int excit = i%4!=0?1:0;
+        int sim = rand()%1000<500? 1:0;
+        double phase = (double)( rand()%1000 )/1000.0 *2*PI;
+        double theta = PI*((double)i)/NUM_NEURON;
+        neurons[i] = new Neuron(phase,theta,sim,excit);
+        neurons[i]->initvoltage(0.0);
+        neurons[i]->initpsc("ampa",0,0);
+        neurons[i]->initpsc("nmda",0,0);
+        neurons[i]->initpsc("gaba",0,0);
+        f<<phase<<'\t'<<theta<<'\t'<<sim<<'\t'<<excit<<endl;
+    }
+    f.close();
+    /*
+     * init connection
+     */
+    
+    Connection con(NUM_NEURON,neurons,SPARSE);
+    con.saveConnect("connect.txt");
+    /*
+     *loop for evoluation:
+      1.update g w.r.t. lgn spike
+      2.update v w.r.t g, and find the spike
+      3.update g w.r.t v's spike
+      But the v is not updated in this loop, it will cause residual for v and v's spike
+      Luckily, accurate g is enough for next loop, and residual for v overall during the whole evolution
+      will be order cubic time step.
+     * */
+    for(int cycle=0; cycle<NUM_CYCLE; cycle++)
+    {
+         for(int sec=0; sec<SECOND_PER_CYCLE; sec++)
+         {
+            int second = sec + cycle*SECOND_PER_CYCLE;
+            cout<<"time: "<<second<<" s"<<endl;
+            for(int t=0; t<CLK; t++)
+            {
+                 double time = second + t*TINVAL;
+                 double simulate_theta = PI*sec/SECOND_PER_CYCLE;
+                 double simulate_phase = w*time;
+                 double simulate_constrast = 12;
+                 for(int i=0; i<NUM_NEURON; i++)
+                 {
+                     neurons[i]->evolve(simulate_theta,simulate_phase,simulate_constrast);
+                 }
+                /*
+                *   check the spike for every neuron(reset the voltage and refraction) 
+                *   and convey the spike to connected others
+                * */
+                for(int i=0; i<NUM_NEURON; i++)
+                 {
+                     double ts = neurons[i]->checkspike();
+                     
+                        if(ts>=0)
+                        {
+                            //cout<<time<<'\t';
+                            //convey to others
+                            for(int j = 0; j<NUM_NEURON; j++)
+                            {
+                                if( !neurons[i]->isexcit() )
+                                    neurons[j]->Ispikecome(con.Istrong[i][j],ts);
+                                else
+                                    neurons[j]->Espikecome(con.Estrong[i][j],ts);
+                            }
+                        }
+                 }
+            }
+
+             
+             
+             /*
+             * one second finished, store the states, cal and store the firing rates 
+             * and reset the neurons for next second evolving
+             * */
+
+            for(int i =0; i<NUM_NEURON; i++)
+            {
+                 string s1 = itoa(i+1);
+                 string s2 = itoa(second+1);
+                 string fname(argv[1]);
+                 fname = fname + "/voltage_neu_"+s1+"sec_"+s2+".txt";
+                 /*
+                 ofstream f;
+                 f.open(fname.c_str());
+                 neurons[i]->print_voltage(f);
+                 f.close();
+                 */
+                 neurons[i]->reset();
+            }
+         }
+    }
+
+    cout<<"evolve finished"<<endl;
+             for(int i =0; i<NUM_NEURON; i++)
+            {
+                 string s1 = itoa(i+1);
+                 string fname(argv[1]);
+                 fname = fname +  "/spike_time_neu_"+s1+".txt";
+                 ofstream f;
+                 f.open(fname.c_str());
+                 neurons[i]->print_spiketime(f);
+                 f.close();
+            }
+    
+    cout<<"all finished!"<<endl;
+    for(int i=0; i<NUM_NEURON; i++)
+    {
+        delete neurons[i];
+    }
+
+    return 0;
+}
